@@ -1,0 +1,68 @@
+# Virtual environment
+venv/
+env/
+.venv/
+
+# Python files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# IDE and editor files
+.idea/
+.vscode/
+*.sublime-workspace
+
+# Build and distribution
+dist/
+build/
+*.egg-info/
+
+# Logs and databases
+*.log
+*.sqlite
+*.db
+
+# Sensitive files
+.env
+.env.local
+.env.development
+.env.production
+
+# Backend-specific output folder
+backend/outputs/
+
+# Backend-specific tools (if not part of the repo)
+backend/theHarvester/
+backend/spiderfoot/
+
+# Node.js (if frontend uses it)
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Frontend build output (if applicable)
+frontend/dist/
+frontend/build/
+
+# System files
+*.swp
+*~
+
+# Ignore macOS metadata
+._*
+
+# Ignore Windows image file caches
+Thumbs.db
+ehthumbs.db
+
+# Ignore temporary files
+*.tmp
+*.bak

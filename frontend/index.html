@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Red Team Recon Toolkit</title>
+  <!-- Prevent favicon 404 -->
+  <link rel="icon" href="data:," />
+  <!-- External stylesheet -->
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="gpu-accelerated">
+  <!-- Matrix Background Effect -->
+  <canvas id="matrixCanvas" class="matrix-bg"></canvas>
+  
+  <!-- Animated Grid Background -->
+  <div class="grid-bg"></div>
+  
+  <!-- Header -->
+  <header class="gpu-accelerated">
+    <div class="header-glow"></div>
+    <h1 class="main-title">
+      <span class="icon">🔍</span>
+      <span class="text-gradient" data-text="Red Team Recon Toolkit">Red Team Recon Toolkit</span>
+    </h1>
+    <p class="subtitle">Advanced Reconnaissance & Intelligence Gathering</p>
+    <div class="header-particles"></div>
+  </header>
+
+  <!-- Main Container -->
+  <main class="container">
+    <!-- Recon Form -->
+    <section class="form-section card-glow">
+      <div class="section-header">
+        <h2>
+          <span class="section-icon"></span>
+          Target Configuration
+        </h2>
+        <div class="status-indicator" id="connectionStatus">
+          <div class="pulse"></div>
+          <span>Ready</span>
+        </div>
+      </div>
+
+      <form id="reconForm" class="enhanced-form">
+        <!-- Target input -->
+        <div class="input-group">
+          <label for="targetInput" class="floating-label">
+            <span class="label-icon">🎯</span>
+            Target Domain / IP
+          </label>
+          <input type="text" id="targetInput" placeholder="example.com" required class="cyber-input" />
+          <div class="input-border"></div>
+        </div>
+
+        <!-- Auth Key input -->
+        <div class="input-group">
+          <label for="authInput" class="floating-label">
+            <span class="label-icon">🔐</span>
+            Authorization Key
+          </label>
+          <input type="password" id="authInput" placeholder="Enter auth key" required class="cyber-input" />
+          <div class="input-border"></div>
+          <button type="button" class="toggle-visibility" id="authToggleBtn">
+            <span id="authToggleIcon">👁️</span>
+          </button>
+        </div>
+
+        <!-- Wordlist input -->
+        <div class="input-group">
+          <label for="wordlistInput" class="floating-label">
+            <span class="label-icon">📝</span>
+            Wordlist (optional)
+          </label>
+          <input type="text" id="wordlistInput" placeholder="Path to wordlist" class="cyber-input" />
+          <div class="input-border"></div>
+        </div>
+
+        <!-- SpiderFoot checkbox -->
+        <div class="checkbox-group">
+          <label class="cyber-checkbox">
+            <input type="checkbox" id="spiderfootCheckbox" />
+            <span class="checkmark">
+              <svg class="check-icon" viewBox="0 0 24 24">
+                <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+              </svg>
+            </span>
+            <span class="checkbox-text">
+              <span class="checkbox-icon">🕷️</span>
+              Run SpiderFoot Scan
+            </span>
+          </label>
+        </div>
+
+        <!-- Submit -->
+        <button type="submit" class="cyber-button primary">
+          <span class="button-content">
+            <span class="button-icon">🚀</span>
+            <span class="button-text">Run Recon</span>
+          </span>
+          <div class="button-glow"></div>
+          <div class="loading-spinner"></div>
+        </button>
+      </form>
+    </section>
+
+    <!-- Results Section -->
+    <section class="results-section card-glow">
+      <div class="section-header">
+        <h2>
+          <span class="section-icon">📊</span>
+          Reconnaissance Results
+        </h2>
+        <div class="results-controls">
+          <button class="control-btn" onclick="exportResults()">
+            <span>💾</span> Export
+          </button>
+          <button class="control-btn" onclick="clearResults()">
+            <span>🗑️</span> Clear
+          </button>
+        </div>
+      </div>
+
+      <div id="results" class="results-container">
+        <div class="placeholder">
+          <div class="placeholder-icon">⏳</div>
+          <p>Reconnaissance results will appear here...</p>
+          <div class="scan-animation"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Footer -->
+  <footer>
+    <div class="footer-content">
+      <p>&copy; 2025 Red Team Recon Toolkit | Advanced Cybersecurity Intelligence</p>
+      <div class="footer-links">
+        <a href="#" class="footer-link">Documentation</a>
+        <a href="#" class="footer-link">API Reference</a>
+        <a href="#" class="footer-link">Support</a>
+      </div>
+    </div>
+  </footer>
+
+  <!-- External Script -->
+  <script src="script.js"></script>
+</body>
+</html>
