@@ -59,8 +59,8 @@ dotenv = safe_import('dotenv')
 if dotenv:
     try:
         dotenv.load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
-    except:
-        pass
+    except Exception as e:
+        print(f"Failed to load .env file: {e}")
 
 # -------------------------
 # Configuration
@@ -88,6 +88,7 @@ CORS(app)
 # Utility functions
 # -------------------------
 def require_authorization(req):
+    """Check if the request is authorized"""
     key = req.args.get("auth") or req.headers.get("X-RECON-AUTH")
     if not AUTHORIZATION_KEY:
         return False, "Server-side authorization key not configured."
@@ -96,14 +97,18 @@ def require_authorization(req):
     return True, None
 
 def save_output(target, data):
+    """Save recon results to JSON and CSV files"""
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", target)
     outdir = os.path.join(OUTPUT_DIR, safe)
     os.makedirs(outdir, exist_ok=True)
     timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    
+    # Save JSON
     json_path = os.path.join(outdir, f"recon_{timestamp}.json")
     with open(json_path, "w") as f:
         json.dump(data, f, indent=2)
 
+    # Save summary CSV
     csv_path = os.path.join(outdir, f"summary_{timestamp}.csv")
     with open(csv_path, "w", newline="") as csvf:
         writer = csv.writer(csvf)
@@ -113,19 +118,42 @@ def save_output(target, data):
                 h.get("hostname"), ",".join(h.get("ips", [])), ",".join(str(p) for p in h.get("open_ports", [])),
                 ";".join(h.get("services", []))
             ])
-    return json_path, csv_path
+
+    # Save CVE CSV
+    cve_csv_path = os.path.join(outdir, f"cve_{timestamp}.csv")
+    with open(cve_csv_path, "w", newline="") as csvf:
+        writer = csv.writer(csvf)
+        writer.writerow(["software", "cve_id", "cvss", "summary", "references"])
+        for software, cves in data.get("cves", {}).items():
+            for cve in cves:
+                writer.writerow([
+                    software,
+                    cve.get("id", "N/A"),
+                    cve.get("cvss", "N/A"),
+                    cve.get("summary", "")[:200],
+                    ";".join(cve.get("references", []))
+                ])
+
+    return json_path, csv_path, cve_csv_path
 
 def normalized_domain(target):
-    t = target.strip()
+    """Normalize and validate domain input"""
+    if not target or not isinstance(target, str):
+        return None
+    t = target.strip().lower()
     t = re.sub(r"^https?://", "", t)
     t = t.split("/")[0]
-    return t.lower()
+    # Validate domain format
+    if not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9.-]{1,253}[a-zA-Z0-9]$', t):
+        return None
+    return t
 
-def dns_resolve(hostname, timeout=3.0):
+def dns_resolve(hostname, timeout=2.0):
+    """Resolve DNS with multiple fallbacks"""
     ips = set()
     print(f"Resolving DNS for {hostname}")
 
-    # Try using dns.resolver if available
+    # Try dns.resolver
     if dns_resolver:
         try:
             resolver = dns_resolver.Resolver()
@@ -149,7 +177,7 @@ def dns_resolve(hostname, timeout=3.0):
         except Exception as e:
             print(f"DNS resolver failed for {hostname}: {str(e)}")
 
-    # Fallback to subprocess dig
+    # Fallback to dig
     if not ips:
         try:
             result = subprocess.run(['dig', '+short', hostname, 'A'], capture_output=True, text=True, timeout=timeout)
@@ -160,7 +188,6 @@ def dns_resolve(hostname, timeout=3.0):
                     if line and line.count('.') == 3 and not line.startswith(';'):
                         ips.add(line)
                         print(f"Resolved A record via dig: {line}")
-                # Try AAAA records
                 result_aaaa = subprocess.run(['dig', '+short', hostname, 'AAAA'], capture_output=True, text=True, timeout=timeout)
                 if result_aaaa.returncode == 0:
                     lines = result_aaaa.stdout.split('\n')
@@ -170,7 +197,9 @@ def dns_resolve(hostname, timeout=3.0):
                             ips.add(line)
                             print(f"Resolved AAAA record via dig: {line}")
         except FileNotFoundError:
-            print(f"dig command not available for {hostname}")
+            print(f"dig command not found for {hostname}")
+        except subprocess.TimeoutExpired:
+            print(f"dig timed out for {hostname}")
         except Exception as e:
             print(f"dig subprocess failed for {hostname}: {str(e)}")
 
@@ -188,6 +217,7 @@ def dns_resolve(hostname, timeout=3.0):
     return list(ips)
 
 def whois_lookup(domain):
+    """Perform WHOIS lookup with python-whois or subprocess"""
     if whois_module:
         try:
             w = whois_module.whois(domain)
@@ -200,22 +230,28 @@ def whois_lookup(domain):
                 "name_servers": w.name_servers,
                 "emails": w.emails,
                 "nets": w.nets if hasattr(w, 'nets') else None,
-                "cidr": w.cidr if hasattr(w, 'cidr') else None
+                "cidr": w.cidr if hasattr(w, 'cidr') else None,
+                "source": "python-whois"
             }
         except Exception as e:
             print(f"WHOIS lookup failed for {domain}: {str(e)}")
     
     # Fallback to subprocess whois
     try:
-        result = subprocess.run(['whois', domain], capture_output=True, text=True, timeout=30)
+        result = subprocess.run(['whois', domain], capture_output=True, text=True, timeout=20)
         if result.returncode == 0:
             return {"whois": result.stdout, "source": "subprocess"}
+    except FileNotFoundError:
+        print(f"whois command not found for {domain}")
+    except subprocess.TimeoutExpired:
+        print(f"whois subprocess timed out for {domain}")
     except Exception as e:
-        print(f"Subprocess whois failed for {domain}: {str(e)}")
+        print(f"whois subprocess failed for {domain}: {str(e)}")
     
     return {"error": "WHOIS not available"}
 
 def crt_sh_subdomains(domain):
+    """Query crt.sh for subdomains"""
     if not requests:
         return []
     
@@ -223,7 +259,7 @@ def crt_sh_subdomains(domain):
     try:
         url = f"https://crt.sh/?q=%25.{domain}&output=json"
         print(f"Querying crt.sh for {domain}")
-        r = requests.get(url, timeout=15)
+        r = requests.get(url, timeout=10)
         if r.status_code == 200:
             try:
                 arr = r.json()
@@ -245,38 +281,35 @@ def crt_sh_subdomains(domain):
     return sorted(found)
 
 def dns_bruteforce(domain, wordlist=None, threads=10):
+    """Perform DNS brute-forcing with thread-safe set"""
     if wordlist is None:
         wordlist = DEFAULT_WORDS
-    found = []
-    q = Queue()
-    for w in wordlist:
-        q.put(w)
-    lock = threading.Lock()
-
-    def worker():
-        while not q.empty():
-            try:
-                n = q.get_nowait()
-            except Exception:
-                return
-            host = f"{n}.{domain}"
-            ips = dns_resolve(host)
-            if ips:
-                with lock:
-                    found.append((host, ips))
-            q.task_done()
+    found = set()
+    
+    def worker(host):
+        ips = dns_resolve(host)
+        if ips:
+            found.add((host, ips))
 
     threads_list = []
-    for _ in range(min(threads, len(wordlist))):
-        t = threading.Thread(target=worker)
+    for w in wordlist:
+        host = f"{w}.{domain}"
+        t = threading.Thread(target=worker, args=(host,))
         t.daemon = True
         t.start()
         threads_list.append(t)
+        if len(threads_list) >= threads:
+            for t in threads_list:
+                t.join()
+            threads_list = []
 
-    q.join()
-    return found
+    for t in threads_list:
+        t.join()
 
-def simple_port_scan(ip, ports=None, timeout=2.0):
+    return sorted([(host, ips) for host, ips in found], key=lambda x: x[0])
+
+def simple_port_scan(ip, ports=None, timeout=1.5):
+    """Perform simple port scanning with sockets"""
     if ports is None:
         ports = TOP_PORTS
     open_ports = []
@@ -288,7 +321,7 @@ def simple_port_scan(ip, ports=None, timeout=2.0):
             result = s.connect_ex((ip, p))
             if result == 0:
                 try:
-                    s.settimeout(0.8)
+                    s.settimeout(0.5)
                     s.sendall(b"\r\n")
                     banner = s.recv(512)
                     banner_text = banner.decode(errors="ignore").strip()
@@ -306,6 +339,7 @@ def simple_port_scan(ip, ports=None, timeout=2.0):
     return open_ports, services
 
 def detect_techstack_from_url(url):
+    """Detect tech stack using builtwith or HTTP headers"""
     tech = {}
     if builtwith:
         try:
@@ -316,7 +350,7 @@ def detect_techstack_from_url(url):
     
     if requests:
         try:
-            r = requests.get(url, timeout=6)
+            r = requests.get(url, timeout=5)
             tech = {"headers_guess": dict(r.headers)}
         except Exception as e:
             print(f"Tech stack detection failed for {url}: {str(e)}")
@@ -326,6 +360,7 @@ def detect_techstack_from_url(url):
     return tech
 
 def github_search_code(domain, token=None, max_results=30):
+    """Search GitHub for code leaks"""
     if not requests:
         return []
     
@@ -338,7 +373,7 @@ def github_search_code(domain, token=None, max_results=30):
             url = "https://api.github.com/search/code"
             params = {"q": q, "per_page": max_results}
             print(f"Querying GitHub for {domain}")
-            r = requests.get(url, headers=headers, params=params, timeout=10)
+            r = requests.get(url, headers=headers, params=params, timeout=8)
             if r.status_code == 200:
                 data = r.json()
                 for item in data.get("items", [])[:max_results]:
@@ -356,7 +391,7 @@ def github_search_code(domain, token=None, max_results=30):
         q = f'{domain} "password" OR "secret" OR "api_key" OR "aws_secret"'
         url = f"https://github.com/search?q={requests.utils.quote(q)}&type=code"
         print(f"Querying GitHub fallback for {domain}")
-        r = requests.get(url, headers=headers, timeout=10)
+        r = requests.get(url, headers=headers, timeout=8)
         if r.status_code == 200:
             html = r.text
             for match in re.findall(r'href="(/[^/]+/[^/]+/blob/[^"]+)"', html)[:max_results]:
@@ -366,6 +401,7 @@ def github_search_code(domain, token=None, max_results=30):
     return results
 
 def pastebin_search(domain, max_results=10):
+    """Search Pastebin for leaks"""
     if not requests:
         return []
     
@@ -373,7 +409,7 @@ def pastebin_search(domain, max_results=10):
     try:
         url = f"https://pastebin.com/search?q={requests.utils.quote(domain)}"
         print(f"Querying Pastebin for {domain}")
-        r = requests.get(url, timeout=8, headers={"User-Agent": "ReconToolkit/1.0"})
+        r = requests.get(url, timeout=6, headers={"User-Agent": "ReconToolkit/1.0"})
         if r.status_code == 200:
             html = r.text
             for m in re.findall(r'href="/([A-Za-z0-9]{8})"', html):
@@ -387,7 +423,7 @@ def pastebin_search(domain, max_results=10):
     for u in finds:
         try:
             print(f"Fetching Pastebin content from {u}")
-            r = requests.get(u, timeout=6)
+            r = requests.get(u, timeout=5)
             if r.status_code == 200 and domain in r.text:
                 results.append({"url": u, "snippet": r.text[:500]})
         except Exception as e:
@@ -395,6 +431,7 @@ def pastebin_search(domain, max_results=10):
     return results
 
 def try_s3_bucket_guess(domain):
+    """Guess and check S3 bucket accessibility"""
     if not requests:
         return []
     
@@ -408,7 +445,7 @@ def try_s3_bucket_guess(domain):
         for u in urls:
             try:
                 print(f"Checking S3 bucket at {u}")
-                r = requests.get(u, timeout=6, headers=headers, allow_redirects=True)
+                r = requests.get(u, timeout=5, headers=headers, allow_redirects=True)
                 if r.status_code in (200, 403):
                     found.append({"bucket": c, "url": u, "status": r.status_code})
             except Exception as e:
@@ -416,6 +453,7 @@ def try_s3_bucket_guess(domain):
     return found
 
 def cve_search(query_software):
+    """Search CVEs for a given software"""
     if not requests:
         return []
     
@@ -423,23 +461,42 @@ def cve_search(query_software):
     try:
         url = f"https://cve.circl.lu/api/search/{requests.utils.quote(query_software)}"
         print(f"Querying CVE for {query_software}")
-        r = requests.get(url, timeout=10)
+        r = requests.get(url, timeout=8)
         if r.status_code == 200:
             data = r.json()
             for c in data.get("results", [])[:20]:
-                out.append({"id": c.get("id"), "summary": c.get("summary"),
-                            "cvss": c.get("cvss"), "references": c.get("references")})
+                out.append({
+                    "id": c.get("id"),
+                    "summary": c.get("summary"),
+                    "cvss": c.get("cvss"),
+                    "references": c.get("references"),
+                    "source": "cve.circl.lu"
+                })
     except Exception as e:
         print(f"CVE search error for {query_software}: {str(e)}")
     return out
 
 def shodan_lookup_ip(ip):
+    """Lookup IP in Shodan"""
     if not SHODAN_API_KEY or not shodan:
         return {"error": "Shodan not configured or library missing"}
     try:
         api = shodan.Shodan(SHODAN_API_KEY)
         print(f"Querying Shodan for {ip}")
         res = api.host(ip)
+        # Add CVEs from Shodan if available
+        if "vulns" in res:
+            cves = []
+            for cve_id in res.get("vulns", []):
+                cves.append({
+                    "id": cve_id,
+                    "summary": f"Detected by Shodan for {ip}",
+                    "cvss": None,
+                    "references": [],
+                    "source": "shodan",
+                    "ip": ip
+                })
+            res["detected_cves"] = cves
         return res
     except Exception as e:
         print(f"Shodan lookup error for {ip}: {str(e)}")
@@ -461,15 +518,13 @@ def run_harvester_subprocess(domain, limit=200):
     for cmd in commands:
         try:
             print(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=100)
             if result.returncode == 0:
                 output = result.stdout
-                # Parse emails
                 email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
                 found_emails = re.findall(email_pattern, output)
                 emails.update(found_emails)
                 
-                # Parse hostnames
                 lines = output.split('\n')
                 for line in lines:
                     if domain in line and '.' in line:
@@ -477,9 +532,11 @@ def run_harvester_subprocess(domain, limit=200):
                         for word in words:
                             if word.endswith(domain) and word.count('.') >= 1:
                                 hostnames.add(word.strip('.,;:'))
-                break  # Success, don't try other commands
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            continue
+                break
+        except FileNotFoundError:
+            print(f"theHarvester command not found: {' '.join(cmd)}")
+        except subprocess.TimeoutExpired:
+            print(f"theHarvester timed out: {' '.join(cmd)}")
         except Exception as e:
             print(f"theHarvester error: {e}")
             continue
@@ -491,18 +548,21 @@ def get_typosquats_subprocess(domain):
     try:
         print(f"Running dnstwist subprocess for {domain}")
         result = subprocess.run(['dnstwist', '--format', 'json', domain], 
-                              capture_output=True, text=True, timeout=60)
+                              capture_output=True, text=True, timeout=30)
         if result.returncode == 0:
             data = json.loads(result.stdout)
             registered = [d['domain'] for d in data[1:] if d.get('dns_a') or d.get('dns_aaaa')]
             return registered
-    except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.CalledProcessError) as e:
-        print(f"dnstwist command error for {domain}: {str(e)}")
+    except FileNotFoundError:
+        print(f"dnstwist command not found for {domain}")
+    except subprocess.TimeoutExpired:
+        print(f"dnstwist timed out for {domain}")
     except Exception as e:
         print(f"dnstwist subprocess error for {domain}: {str(e)}")
     return []
 
 def get_mx_records(domain):
+    """Get MX records for the domain"""
     mx = []
     if dns_resolver:
         try:
@@ -514,10 +574,9 @@ def get_mx_records(domain):
         except Exception as e:
             print(f"MX record lookup failed for {domain}: {str(e)}")
     else:
-        # Fallback to dig
         try:
             result = subprocess.run(['dig', '+short', domain, 'MX'], 
-                                  capture_output=True, text=True, timeout=10)
+                                  capture_output=True, text=True, timeout=5)
             if result.returncode == 0:
                 lines = result.stdout.split('\n')
                 for line in lines:
@@ -527,7 +586,9 @@ def get_mx_records(domain):
                         if mx_record:
                             mx.append(mx_record)
         except FileNotFoundError:
-            print(f"dig command not available for MX lookup: {domain}")
+            print(f"dig command not found for MX lookup: {domain}")
+        except subprocess.TimeoutExpired:
+            print(f"dig timed out for MX lookup: {domain}")
         except Exception as e:
             print(f"MX subprocess failed for {domain}: {e}")
     return mx
@@ -544,7 +605,7 @@ def run_sublist3r_subprocess(domain):
     for cmd in commands:
         try:
             print(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=100)
             if result.returncode == 0:
                 output_lines = result.stdout.split('\n')
                 for line in output_lines:
@@ -552,8 +613,10 @@ def run_sublist3r_subprocess(domain):
                     if line.endswith(domain) and line not in subdomains:
                         subdomains.append(line)
                 break
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            continue
+        except FileNotFoundError:
+            print(f"Sublist3r command not found: {' '.join(cmd)}")
+        except subprocess.TimeoutExpired:
+            print(f"Sublist3r timed out: {' '.join(cmd)}")
         except Exception as e:
             print(f"Sublist3r error: {e}")
             continue
@@ -571,22 +634,129 @@ def run_spiderfoot_subprocess(domain, output_dir):
         for cmd in spiderfoot_commands:
             try:
                 print(f"Running SpiderFoot: {' '.join(cmd)}")
-                result = subprocess.run(cmd, cwd=output_dir, capture_output=True, text=True, timeout=300)
+                result = subprocess.run(cmd, cwd=output_dir, capture_output=True, text=True, timeout=200)
                 if result.returncode == 0:
                     return {"status": "success", "output": result.stdout[:1000]}
                 break
-            except (subprocess.TimeoutExpired, FileNotFoundError):
-                continue
+            except FileNotFoundError:
+                print(f"SpiderFoot command not found: {' '.join(cmd)}")
+            except subprocess.TimeoutExpired:
+                print(f"SpiderFoot timed out: {' '.join(cmd)}")
         
         return {"status": "failed", "error": "SpiderFoot not available or failed"}
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
+def run_nmap_subprocess(target, ports=None):
+    """Run nmap via subprocess as alternative to socket scanning"""
+    if ports is None:
+        ports = TOP_PORTS
+    
+    try:
+        port_range = ",".join(map(str, ports))
+        cmd = ["nmap", "-sS", "-p", port_range, target]
+        print(f"Running nmap: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=50)
+        
+        if result.returncode == 0:
+            open_ports = []
+            lines = result.stdout.split('\n')
+            for line in lines:
+                if '/tcp' in line and 'open' in line:
+                    port = int(line.split('/')[0])
+                    open_ports.append(port)
+            return open_ports
+    except FileNotFoundError:
+        print(f"nmap command not found for {target}")
+    except subprocess.TimeoutExpired:
+        print(f"nmap timed out for {target}")
+    except Exception as e:
+        print(f"nmap error: {e}")
+    
+    return []
+
+def run_amass_subprocess(domain):
+    """Run Amass via subprocess for subdomain enumeration"""
+    subdomains = []
+    try:
+        cmd = ["amass", "enum", "-d", domain]
+        print(f"Running amass: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=150)
+        
+        if result.returncode == 0:
+            lines = result.stdout.strip().split('\n')
+            subdomains = [line.strip() for line in lines if line.strip().endswith(domain)]
+    except FileNotFoundError:
+        print(f"amass command not found for {domain}")
+    except subprocess.TimeoutExpired:
+        print(f"amass timed out for {domain}")
+    except Exception as e:
+        print(f"amass error: {e}")
+    
+    return subdomains
+
+def run_gobuster_subprocess(domain, wordlist_path=None):
+    """Run Gobuster via subprocess for directory enumeration"""
+    if not wordlist_path:
+        return []
+    
+    directories = []
+    try:
+        cmd = ["gobuster", "dir", "-u", f"https://{domain}", "-w", wordlist_path, "-q"]
+        print(f"Running gobuster: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=100)
+        
+        if result.returncode == 0:
+            lines = result.stdout.split('\n')
+            for line in lines:
+                if line.startswith('/'):
+                    directories.append(line.strip())
+    except FileNotFoundError:
+        print(f"gobuster command not found for {domain}")
+    except subprocess.TimeoutExpired:
+        print(f"gobuster timed out for {domain}")
+    except Exception as e:
+        print(f"gobuster error: {e}")
+    
+    return directories
+
+def check_ssl_certificate(domain):
+    """Check SSL certificate information using openssl subprocess"""
+    cert_info = {}
+    try:
+        cmd = ["openssl", "s_client", "-connect", f"{domain}:443", "-servername", domain]
+        result = subprocess.run(cmd, input="\n", capture_output=True, text=True, timeout=8)
+        
+        if result.returncode == 0:
+            output = result.stdout
+            if "subject=" in output:
+                subject_line = [line for line in output.split('\n') if line.strip().startswith('subject=')]
+                if subject_line:
+                    cert_info['subject'] = subject_line[0].replace('subject=', '').strip()
+            
+            if "issuer=" in output:
+                issuer_line = [line for line in output.split('\n') if line.strip().startswith('issuer=')]
+                if issuer_line:
+                    cert_info['issuer'] = issuer_line[0].replace('issuer=', '').strip()
+    except FileNotFoundError:
+        print(f"openssl command not found for {domain}")
+    except subprocess.TimeoutExpired:
+        print(f"openssl timed out for {domain}")
+    except Exception as e:
+        print(f"SSL check error: {e}")
+        cert_info['error'] = str(e)
+    
+    return cert_info
+
 # -------------------------
 # Recon worker
 # -------------------------
 def run_recon(target, options=None):
+    """Base recon function"""
     domain = normalized_domain(target)
+    if not domain:
+        raise ValueError("Invalid or empty domain")
+    
     print(f"Starting recon for {domain}")
     result = {
         "target": domain,
@@ -612,9 +782,9 @@ def run_recon(target, options=None):
 
     # IP ranges from WHOIS
     w = result["whois"]
-    if "nets" in w and w["nets"]:
+    if isinstance(w.get("nets"), list) and w["nets"]:
         result["ip_ranges"] = [net.get("cidr") for net in w["nets"] if net.get("cidr")]
-    elif "cidr" in w:
+    elif w.get("cidr"):
         result["ip_ranges"] = [w["cidr"]]
 
     # Subdomains
@@ -704,11 +874,14 @@ def run_recon(target, options=None):
         if cves:
             result["cves"][s] = cves
 
-    # Shodan
+    # Shodan with CVEs
     if SHODAN_API_KEY and shodan:
         ips = set(ip for h in result["hosts"] for ip in h.get("ips", []))
         for ip in list(ips)[:15]:
-            result["shodan"][ip] = shodan_lookup_ip(ip)
+            shodan_data = shodan_lookup_ip(ip)
+            result["shodan"][ip] = shodan_data
+            if "detected_cves" in shodan_data:
+                result["cves"]["shodan_detected"] = shodan_data["detected_cves"]
 
     # Phishing vectors
     result["phishing_vectors"]["mx_servers"] = get_mx_records(domain)
@@ -725,27 +898,61 @@ def run_recon(target, options=None):
         except Exception as e:
             result["spiderfoot_events"].append({"error": str(e)})
 
-    # Save output
-    json_path, csv_path = save_output(domain, result)
-    result["output_files"] = {"json": json_path, "csv": csv_path}
+    return result
 
-    # Update summary with spiderfoot status
-    spiderfoot_status = "not_run"
-    if result["spiderfoot_events"] and isinstance(result["spiderfoot_events"], list) and result["spiderfoot_events"]:
-        first_event = result["spiderfoot_events"][0]
-        if isinstance(first_event, dict) and "status" in first_event:
-            spiderfoot_status = first_event["status"]
-
-    result["summary"] = {
-        "num_subdomains": len(result["subdomains"]),
-        "num_hosts": len(result["hosts"]),
-        "num_emails": len(result["harvester"].get("emails", [])),
-        "github_hits": len(result["github_hits"]),
-        "paste_hits": len(result["paste_hits"]),
-        "spiderfoot_status": spiderfoot_status
-    }
-
-    print(f"Recon completed for {domain}")
+def enhanced_run_recon(target, options=None):
+    """Enhanced recon function with additional tools"""
+    result = run_recon(target, options)
+    
+    domain = normalized_domain(target)
+    if not domain:
+        raise ValueError("Invalid or empty domain")
+    
+    try:
+        # SSL Certificate check
+        result['ssl_info'] = check_ssl_certificate(domain)
+        
+        # Amass for additional subdomain enumeration
+        amass_subs = run_amass_subprocess(domain)
+        if amass_subs:
+            result['amass_subdomains'] = amass_subs
+            for sub in amass_subs:
+                if sub not in result['subdomains']:
+                    result['subdomains'].append(sub)
+        
+        # Enhanced port scanning with nmap
+        for host_info in result['hosts']:
+            for ip in host_info['ips']:
+                nmap_ports = run_nmap_subprocess(ip)
+                if nmap_ports:
+                    host_info['nmap_ports'] = nmap_ports
+                    all_ports = set(host_info['open_ports'] + nmap_ports)
+                    host_info['open_ports'] = sorted(list(all_ports))
+        
+        # Update summary
+        spiderfoot_status = "not_run"
+        if result["spiderfoot_events"] and isinstance(result["spiderfoot_events"], list) and result["spiderfoot_events"]:
+            first_event = result["spiderfoot_events"][0]
+            if isinstance(first_event, dict):
+                spiderfoot_status = first_event.get("status", "error")
+        
+        result["summary"] = {
+            "num_subdomains": len(result["subdomains"]),
+            "num_hosts": len(result["hosts"]),
+            "num_emails": len(result["harvester"].get("emails", [])),
+            "github_hits": len(result["github_hits"]),
+            "paste_hits": len(result["paste_hits"]),
+            "spiderfoot_status": spiderfoot_status
+        }
+        
+        # Save output
+        json_path, csv_path, cve_csv_path = save_output(domain, result)
+        result["output_files"] = {"json": json_path, "csv": csv_path, "cve_csv": cve_csv_path}
+        
+    except Exception as e:
+        print(f"Enhanced recon features error: {e}")
+        result['enhanced_features_error'] = str(e)
+    
     return result
 
 # -------------------------
@@ -755,6 +962,7 @@ JOBS = {}
 
 @app.route("/api/recon", methods=["GET"])
 def api_recon():
+    """Run reconnaissance for a target domain"""
     ok, msg = require_authorization(request)
     if not ok:
         return jsonify({"error": msg}), 403
@@ -763,6 +971,10 @@ def api_recon():
     if not target:
         return jsonify({"error": "Missing required parameter: target"}), 400
 
+    domain = normalized_domain(target)
+    if not domain:
+        return jsonify({"error": "Invalid domain format"}), 400
+
     wordlist = request.args.get("wordlist")
     use_sf = request.args.get("use_spiderfoot") == "1"
     options = {}
@@ -770,21 +982,22 @@ def api_recon():
         options["wordlist"] = wordlist
     options["use_spiderfoot"] = use_sf
 
-    job_id = f"{int(time.time())}-{re.sub(r'[^0-9A-Za-z]', '', target)[:20]}"
-    JOBS[job_id] = {"status": "running", "target": target, "started": datetime.now(timezone.utc).isoformat()}
+    job_id = f"{int(time.time())}-{re.sub(r'[^0-9A-Za-z]', '', domain)[:20]}"
+    JOBS[job_id] = {"status": "running", "target": domain, "started": datetime.now(timezone.utc).isoformat()}
 
     try:
-        res = run_recon(target, options=options)
-        JOBS[job_id].update({"status": "finished", "finished": datetime.utcnow().isoformat(), "result": res})
+        res = enhanced_run_recon(domain, options=options)
+        JOBS[job_id].update({"status": "finished", "finished": datetime.now(timezone.utc).isoformat(), "result": res})
         return jsonify({"job_id": job_id, "result": res})
     except Exception as e:
         JOBS[job_id].update({"status": "error", "error": str(e)})
-        print(f"Recon error for {target}: {str(e)}")
+        print(f"Recon error for {domain}: {str(e)}")
         traceback.print_exc()
         return jsonify({"job_id": job_id, "error": str(e)}), 500
 
 @app.route("/api/status/<job_id>", methods=["GET"])
 def api_status(job_id):
+    """Check status of a recon job"""
     ok, msg = require_authorization(request)
     if not ok:
         return jsonify({"error": msg}), 403
@@ -832,13 +1045,15 @@ def api_test_tools():
     test_results = {}
     
     # Test subprocess tools
-    subprocess_tools = ["whois", "dnstwist", "sublist3r", "theHarvester", "dig"]
+    subprocess_tools = ["whois", "dnstwist", "sublist3r", "theHarvester", "dig", "nmap", "amass", "openssl"]
     for tool in subprocess_tools:
         try:
             result = subprocess.run([tool, "--help"], capture_output=True, timeout=5)
             test_results[tool] = {"available": result.returncode == 0, "method": "subprocess"}
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            test_results[tool] = {"available": False, "method": "subprocess"}
+        except FileNotFoundError:
+            test_results[tool] = {"available": False, "method": "subprocess", "error": "Command not found"}
+        except subprocess.TimeoutExpired:
+            test_results[tool] = {"available": False, "method": "subprocess", "error": "Timed out"}
         except Exception as e:
             test_results[tool] = {"available": False, "method": "subprocess", "error": str(e)}
     
@@ -862,11 +1077,12 @@ def api_test_tools():
 
 @app.route("/")
 def index():
+    """Root endpoint with usage information"""
     return (
         "<h3>Recon Toolkit Backend (Subprocess-Enhanced)</h3>"
         "<p>Use <code>/api/recon?target=example.com&auth=YOUR_KEY&use_spiderfoot=1</code> to start recon.</p>"
         "<p>Check <code>/api/health</code> for dependency status.</p>"
-        "<p>Check <code>/api/tools/test</code> for individual tool testing.</p>"
+        "<p>Check <code>/api/tools/test?auth=KEY</code> for individual tool testing.</p>"
         "<p><strong>Warning:</strong> Only use against authorized targets.</p>"
         "<h4>Available Endpoints:</h4>"
         "<ul>"
@@ -881,6 +1097,7 @@ def index():
         "<li>Subprocess fallbacks for all tools</li>"
         "<li>Native socket-based port scanning</li>"
         "<li>DNS resolution with multiple fallbacks</li>"
+        "<li>Amass and SSL certificate checks</li>"
         "<li>Works without Python security tool libraries</li>"
         "</ul>"
     )
@@ -892,138 +1109,6 @@ def not_found(error):
 @app.errorhandler(500)
 def internal_error(error):
     return jsonify({"error": "Internal server error"}), 500
-
-# Additional utility functions for enhanced functionality
-def run_nmap_subprocess(target, ports=None):
-    """Run nmap via subprocess as alternative to socket scanning"""
-    if ports is None:
-        ports = TOP_PORTS
-    
-    try:
-        port_range = ",".join(map(str, ports))
-        cmd = ["nmap", "-sS", "-p", port_range, target]
-        print(f"Running nmap: {' '.join(cmd)}")
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        
-        if result.returncode == 0:
-            open_ports = []
-            lines = result.stdout.split('\n')
-            for line in lines:
-                if '/tcp' in line and 'open' in line:
-                    port = int(line.split('/')[0])
-                    open_ports.append(port)
-            return open_ports
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-        print(f"nmap not available or timed out: {e}")
-    except Exception as e:
-        print(f"nmap error: {e}")
-    
-    return []
-
-def run_amass_subprocess(domain):
-    """Run Amass via subprocess for subdomain enumeration"""
-    subdomains = []
-    try:
-        cmd = ["amass", "enum", "-d", domain]
-        print(f"Running amass: {' '.join(cmd)}")
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-        
-        if result.returncode == 0:
-            lines = result.stdout.strip().split('\n')
-            subdomains = [line.strip() for line in lines if line.strip().endswith(domain)]
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-        print(f"amass not available or timed out: {e}")
-    except Exception as e:
-        print(f"amass error: {e}")
-    
-    return subdomains
-
-def run_gobuster_subprocess(domain, wordlist_path=None):
-    """Run Gobuster via subprocess for directory enumeration"""
-    if not wordlist_path:
-        return []
-    
-    directories = []
-    try:
-        cmd = ["gobuster", "dir", "-u", f"https://{domain}", "-w", wordlist_path, "-q"]
-        print(f"Running gobuster: {' '.join(cmd)}")
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        
-        if result.returncode == 0:
-            lines = result.stdout.split('\n')
-            for line in lines:
-                if line.startswith('/'):
-                    directories.append(line.strip())
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-        print(f"gobuster not available or timed out: {e}")
-    except Exception as e:
-        print(f"gobuster error: {e}")
-    
-    return directories
-
-def check_ssl_certificate(domain):
-    """Check SSL certificate information using openssl subprocess"""
-    cert_info = {}
-    try:
-        cmd = ["openssl", "s_client", "-connect", f"{domain}:443", "-servername", domain]
-        result = subprocess.run(cmd, input="\n", capture_output=True, text=True, timeout=10)
-        
-        if result.returncode == 0:
-            output = result.stdout
-            # Parse certificate information
-            if "subject=" in output:
-                subject_line = [line for line in output.split('\n') if line.strip().startswith('subject=')]
-                if subject_line:
-                    cert_info['subject'] = subject_line[0].replace('subject=', '').strip()
-            
-            if "issuer=" in output:
-                issuer_line = [line for line in output.split('\n') if line.strip().startswith('issuer=')]
-                if issuer_line:
-                    cert_info['issuer'] = issuer_line[0].replace('issuer=', '').strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-        print(f"openssl not available or timed out: {e}")
-        cert_info['error'] = str(e)
-    except Exception as e:
-        print(f"SSL check error: {e}")
-        cert_info['error'] = str(e)
-    
-    return cert_info
-
-# Enhanced recon function with additional subprocess tools
-def enhanced_run_recon(target, options=None):
-    """Enhanced recon function with additional tools"""
-    result = run_recon(target, options)  # Run base recon first
-    
-    domain = normalized_domain(target)
-    
-    # Add enhanced features
-    try:
-        # SSL Certificate check
-        result['ssl_info'] = check_ssl_certificate(domain)
-        
-        # Try Amass for additional subdomain enumeration
-        amass_subs = run_amass_subprocess(domain)
-        if amass_subs:
-            result['amass_subdomains'] = amass_subs
-            for sub in amass_subs:
-                if sub not in result['subdomains']:
-                    result['subdomains'].append(sub)
-        
-        # Enhanced port scanning with nmap if available
-        for host_info in result['hosts']:
-            for ip in host_info['ips']:
-                nmap_ports = run_nmap_subprocess(ip)
-                if nmap_ports:
-                    host_info['nmap_ports'] = nmap_ports
-                    # Merge with existing ports
-                    all_ports = set(host_info['open_ports'] + nmap_ports)
-                    host_info['open_ports'] = sorted(list(all_ports))
-        
-    except Exception as e:
-        print(f"Enhanced recon features error: {e}")
-        result['enhanced_features_error'] = str(e)
-    
-    return result
 
 if __name__ == "__main__":
     print("🚀 Starting Recon Toolkit backend (Subprocess-Enhanced)")
@@ -1038,12 +1123,12 @@ if __name__ == "__main__":
     print("⚠️ This version minimizes import dependencies and relies on system tools")
     
     # Test critical system tools on startup
-    critical_tools = ["ping"]  # Removed nslookup from critical tools
+    critical_tools = ["ping"]
     for tool in critical_tools:
         try:
             subprocess.run([tool, "--help"], capture_output=True, timeout=2)
             print(f"✅ {tool} available")
-        except:
-            print(f"❌ {tool} not available")
+        except Exception as e:
+            print(f"❌ {tool} not available: {e}")
     
     app.run(host="0.0.0.0", port=PORT, debug=False)
